@@ -1,13 +1,13 @@
 import pytest
 
-from artifact_gen.exceptions import PollExhaustedError, UnknownJobError
-from artifact_gen.in_memory.generation import InMemoryGenerationService
-from artifact_gen.in_memory.publisher import InMemoryResultPublisher
-from artifact_gen.in_memory.queue import InMemoryOrderQueue
-from artifact_gen.in_memory.repository import InMemoryArtifactRepository
-from artifact_gen.models import FailureStage, Order
-from artifact_gen.orchestrator import PollConfig, process_order
-from artifact_gen.worker import run
+from orderforge.exceptions import PollExhaustedError, UnknownJobError
+from orderforge.in_memory.generation import InMemoryGenerationService
+from orderforge.in_memory.publisher import InMemoryResultPublisher
+from orderforge.in_memory.queue import InMemoryOrderQueue
+from orderforge.in_memory.repository import InMemoryArtifactRepository
+from orderforge.models import FailureStage, Order
+from orderforge.orchestrator import PollConfig, process_order
+from orderforge.worker import run
 
 
 def make_services(asset_should_fail=lambda order: False, metadata_should_fail=lambda order: False):
