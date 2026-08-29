@@ -131,3 +131,53 @@ Target progression:
 **code shape -> local correctness -> lifecycle/ownership -> end-to-end guarantee
 -> concurrency/atomicity -> distributed ambiguity -> operational recovery ->
 roadmap/design-assumption review**
+
+### Orderforge Phase 4 — concurrency / atomicity
+
+**Reviewer findings**
+- Challenged `jitter_ratio=0.0` because deterministic retries undermine the
+  Phase 4 thundering-herd protection.
+- Challenged optional idempotency keys on mutating APIs as an unsafe escape
+  hatch when idempotency is intended as a system invariant.
+- Correctly challenged the claim that `get_status()` never accesses shared
+  mutable state and therefore needs no lock.
+- Challenged publisher helper thread-safety and worker-loop locking.
+
+**Reverse shadow**
+- The jitter implementation itself was reachable when configured non-zero;
+  the real defect was the operational default.
+- `max_delay_seconds` also needed to remain a hard cap after applying
+  jitter.
+- Physical queue-entry ownership is not the same as logical-order
+  ownership. Duplicate entries for one order deliberately converge on the
+  same idempotent job, so multiple workers can poll the same `_JobRecord`.
+- Publisher `_already_submitted_locked()` and
+  `_record_submission_locked()` must NOT independently acquire the same
+  ordinary Lock. Their caller owns the lock across the complete
+  check → append → record transaction.
+- Locking `_worker_loop()` would serialize the worker pool. Protect the
+  smallest shared-state invariant rather than the whole concurrent
+  workflow.
+- Public mutable publisher lists weakened the thread-safety contract even
+  though writes were locked; expose locked snapshots instead.
+- `DEFAULT_WORKER_POOL_SIZE=150`, PLAN documentation, and
+  `run(num_workers=1)` contradicted one another. The runtime default now
+  matches the declared Phase 4 default.
+- A Barrier immediately before a method call does not deterministically
+  expose an internal check-then-act race. Race tests now coordinate inside
+  the observed read so every unlocked caller captures the same pre-mutation
+  state.
+
+**Reasoning progression**
+The next concurrency-review question is no longer simply "does this need a
+lock?" Use:
+
+1. What exact state is shared?
+2. What invariant spans more than one operation?
+3. What is the smallest sequence that must be atomic?
+4. Which code can execute outside that critical section?
+5. Does physical ownership actually imply logical/state ownership?
+6. Can the test deterministically force the race window it claims to test?
+
+The key Phase 4 lesson: locking too broadly can be as architecturally wrong
+as failing to lock at all.

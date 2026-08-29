@@ -26,7 +26,9 @@ def test_retries_transient_failure_with_exponential_backoff():
         RetryConfig(
             max_attempts=3,
             initial_delay_seconds=0.5,
-            backoff_multiplier=2,
+            backoff_multiplier=2.0,
+            max_delay_seconds=10.0,
+            jitter_ratio=0.0,
         ),
         sleeper=sleeps.append,
         dependency_name="dependency",
@@ -54,8 +56,9 @@ def test_retry_delay_is_capped():
         RetryConfig(
             max_attempts=4,
             initial_delay_seconds=1,
-            backoff_multiplier=10,
+            backoff_multiplier=2,
             max_delay_seconds=2,
+            jitter_ratio=0.0,
         ),
         sleeper=sleeps.append,
     )

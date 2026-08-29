@@ -1,13 +1,14 @@
 """
 In-memory FIFO order queue.
 
-No locking: Phase 1 is explicitly single-threaded (see PLAN.md). Locking
-for concurrent take() is scoped to Phase 4 along with the rest of the
-worker pool's thread-safety story, not added preemptively here.
+take() protects the whole check-then-pop sequence. Correctness therefore
+does not depend on deque.popleft() or other individual operations happening
+to be atomic in one Python interpreter.
 """
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from typing import Iterable, Optional
 
@@ -18,11 +19,15 @@ from ..models import Order
 class InMemoryOrderQueue(OrderQueue):
     def __init__(self, orders: Iterable[Order] = ()):
         self._queue = deque(orders)
+        self._lock = threading.Lock()
 
     def take(self) -> Optional[Order]:
-        if not self._queue:
-            return None
-        return self._queue.popleft()
+        with self._lock:
+            if not self._queue:
+                return None
+
+            return self._queue.popleft()
 
     def __len__(self) -> int:
-        return len(self._queue)
+        with self._lock:
+            return len(self._queue)

@@ -112,11 +112,18 @@ submissions; downstream services own the authoritative idempotency record;
 duplicate identical mutations are safe, conflicting reuse fails fast.
 Explicitly separate mutation idempotency from queue-claim recoverability.
 DONE — reviewed and revised.
-Concurrency — bounded worker pool plus explicit locking for every shared
-in-memory structure. Make in-memory queue take atomic. Re-test all Phase 3
-check-then-act paths under concurrent calls.
-Caching — read-through cache for repository reads; define freshness,
-invalidation, and stampede behaviour.
+Concurrency — bounded worker pool (default 150 via `DEFAULT_WORKER_POOL_SIZE`) 
+plus explicit synchronization at shared-state boundaries: atomic queue take, 
+generation idempotency/job-poll state,
+publisher idempotency/result state, and unresolved-order tracking. Duplicate 
+physical queue entries may represent the same logical order, so downstream state 
+cannot assume exclusive worker ownership. `get_status()` therefore protects job 
+lookup and poll-count mutation. Publisher check → append → idempotency-record 
+remains one atomic transaction, while result collections are exposed only as locked
+snapshots. Retry jitter is enabled by default to avoid synchronized retries and 
+`max_delay_seconds` remains a hard cap after jitter. Queue-level retry exhaustion 
+triggers coordinated worker shutdown. Durable queue reserve/ack semantics remain Phase 9.
+DONE — reviewed and corrected.
 Circuit breaker — stop retrying into a known-down dependency; define
 closed/open/half-open transitions and interaction with retry.
 Backpressure — bound intake/work queues and define reject/park/fairness
