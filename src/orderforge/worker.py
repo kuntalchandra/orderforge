@@ -20,6 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List
 
+from .cache import TTLCache
+from .caching import CachingArtifactRepository
 from .exceptions import RetryExhaustedError
 from .idempotency import (
     IdempotentGenerationService,
@@ -164,10 +166,13 @@ def run(
         dependency_name="metadata_generation",
     )
 
-    repository = RetryingProxy(
-        repository,
-        config=retry,
-        dependency_name="artifact_repository",
+    repository = CachingArtifactRepository(
+        RetryingProxy(
+            repository,
+            config=retry,
+            dependency_name="artifact_repository",
+        ),
+        TTLCache(),
     )
 
     publisher = RetryingProxy(
