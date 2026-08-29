@@ -7,7 +7,7 @@ from orderforge.in_memory.queue import InMemoryOrderQueue
 from orderforge.in_memory.repository import InMemoryArtifactRepository
 from orderforge.models import FailureStage, Order
 from orderforge.orchestrator import PollConfig, process_order
-from orderforge.worker import run
+from orderforge.worker import UnresolvedOrderRegistry, run
 
 
 def make_services(asset_should_fail=lambda order: False, metadata_should_fail=lambda order: False):
@@ -51,7 +51,6 @@ def test_metadata_generation_never_triggered_when_asset_generation_fails():
     order = Order(order_id="o3")
     asset_svc, metadata_svc, repo, pub = make_services(asset_should_fail=lambda o: True)
 
-    # Spy on metadata_svc.queue without changing its behavior.
     calls = []
     original_queue = metadata_svc.queue
     metadata_svc.queue = lambda o: calls.append(o.order_id) or original_queue(o)
@@ -105,22 +104,28 @@ def test_rules_1_through_6_table_driven(asset_fails, metadata_fails, expected_sh
 
 def test_unknown_job_id_raises_fail_fast():
     asset_svc, _, _, _ = make_services()
+
     with pytest.raises(UnknownJobError):
         asset_svc.get_status("no-such-job")
 
 
 def test_poll_exhausted_propagates_rather_than_becoming_a_failed_order():
     order = Order(order_id="o5")
-    # pending_polls_before_terminal higher than poll.max_polls => never terminal.
     asset_svc = InMemoryGenerationService(pending_polls_before_terminal=999)
     metadata_svc = InMemoryGenerationService()
     repo = InMemoryArtifactRepository()
     pub = InMemoryResultPublisher()
 
     with pytest.raises(PollExhaustedError):
-        process_order(order, asset_svc, metadata_svc, repo, pub, poll=PollConfig(max_polls=3))
+        process_order(
+            order,
+            asset_svc,
+            metadata_svc,
+            repo,
+            pub,
+            poll=PollConfig(max_polls=3),
+        )
 
-    # Ambiguous failure must NOT be silently turned into a submission.
     assert len(pub.failed_orders) == 0
     assert len(pub.shippable_orders) == 0
 
@@ -133,9 +138,16 @@ def test_worker_drains_queue_with_mixed_outcomes_and_isolates_orders():
         metadata_should_fail=lambda o: o.order_id == "o4",
     )
 
-    processed = run(queue, asset_svc, metadata_svc, repo, pub)
+    taken_count = run(
+        queue,
+        asset_svc,
+        metadata_svc,
+        repo,
+        pub,
+        UnresolvedOrderRegistry(),
+    )
 
-    assert processed == 5
+    assert taken_count == 5
     assert len(queue) == 0
     assert len(pub.shippable_orders) == 3
     assert len(pub.failed_orders) == 2

@@ -93,6 +93,9 @@ feature-flag library drills.
    loop. No retry, no idempotency yet. **DONE — committed.**
 2. **Robust retry mechanism** — backoff for transient errors, applied
    uniformly across all four interfaces via one wrapper, not per-call.
+   Retry exhaustion after an order is known is recorded in an explicitly
+   injected unresolved-order registry so the state remains inspectable.
+   **DONE — reviewed and revised.**
 3. **Idempotency** — dedup cache for generation triggers and result
    submissions, closing the "retry after an ambiguous timeout" gap.
 4. **Concurrency** — multi-threaded worker pool sized per the NFR math,
@@ -126,4 +129,15 @@ natural fit for `@pytest.mark.parametrize` — one table-driven test instead
 of near-duplicate methods per rule.
 
 ## Deviation log
-(Plan Changes vs. Scope Changes — empty until we deviate)
+- **Phase 2 review clarification — unresolved registry lifecycle:** the first
+  retry design allowed `worker.run()` to create a registry internally. Review
+  exposed that the registry then disappeared on return, violating the plan's
+  inspectability requirement. The registry is now an explicit required
+  dependency. This is a plan-implementation correction, not a scope change.
+- **Roadmap risk discovered — ambiguous `OrderQueue.take()`:** Phase 2 retries
+  `take()` uniformly as required, but a destructive remote take can succeed
+  server-side and lose its response; retrying may then take a different order.
+  Phase 3's generation/submission idempotency does not by itself close this
+  gap. Revisit queue semantics in Phase 3: reserve/lease + acknowledgement,
+  visibility timeout, or an equivalent recoverable claim protocol. No queue
+  protocol is introduced in Phase 2 because the current queue is in-memory.
