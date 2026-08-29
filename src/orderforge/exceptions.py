@@ -1,13 +1,4 @@
-"""
-Domain and interaction exceptions.
-
-Generation failures reported by a downstream service are business outcomes and
-are handled by the orchestrator. Exceptions describe failures of the
-interaction itself.
-
-Phase 2 distinguishes transient interaction failures (safe to retry) from
-retry exhaustion. Permanent/programming errors continue to propagate unchanged.
-"""
+"""Domain, interaction, and idempotency exceptions."""
 
 
 class OrderValidationError(Exception):
@@ -36,3 +27,7 @@ class RetryExhaustedError(Exception):
         super().__init__(
             f"retry exhausted for {operation!r} after {attempts} attempts: {cause}"
         )
+
+
+class IdempotencyConflictError(Exception):
+    """An idempotency key was reused for a different logical operation."""

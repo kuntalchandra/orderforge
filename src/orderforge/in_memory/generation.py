@@ -1,27 +1,12 @@
-"""
-In-memory GenerationService.
-
-Design note: jobs resolve deterministically after a configurable number of
-poll calls (`pending_polls_before_terminal`), rather than via a background
-thread + wall-clock delay. This still genuinely exercises the
-orchestrator's poll-until-terminal loop (get_status returns PENDING some
-number of times before a terminal status), without introducing any
-threading — Phase 1 is single-threaded end to end. Realistic wall-clock
-async simulation, if wanted, is a Phase 4+ concern once the worker pool
-itself is concurrent; adding it here would pull concurrency handling
-forward for no correctness benefit.
-
-One instance of this class is used per generation kind (asset, metadata) —
-each gets its own `should_fail` predicate and its own job state.
-"""
+"""In-memory GenerationService with downstream idempotency semantics."""
 
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict
 
-from ..exceptions import UnknownJobError
+from ..exceptions import IdempotencyConflictError, UnknownJobError
 from ..interfaces import GenerationService
 from ..models import JobStatus, Order
 
@@ -30,6 +15,12 @@ from ..models import JobStatus, Order
 class _JobRecord:
     order: Order
     polls_seen: int = 0
+
+
+@dataclass(frozen=True)
+class _IdempotentGenerationRecord:
+    order: Order
+    job_id: str
 
 
 class InMemoryGenerationService(GenerationService):
@@ -41,12 +32,36 @@ class InMemoryGenerationService(GenerationService):
         self._should_fail = should_fail
         self._pending_polls_before_terminal = pending_polls_before_terminal
         self._jobs: Dict[str, _JobRecord] = {}
+        self._idempotency_records: Dict[str, _IdempotentGenerationRecord] = {}
         self._id_counter = itertools.count(1)
 
-    def queue(self, order: Order) -> str:
+    def queue(self, order: Order, idempotency_key: str | None = None) -> str:
+        if idempotency_key is not None:
+            existing = self._idempotency_records.get(idempotency_key)
+            if existing is not None:
+                if existing.order != order:
+                    raise IdempotencyConflictError(
+                        f"generation key {idempotency_key!r} "
+                        "reused for a different order"
+                    )
+                return existing.job_id
+
         job_id = f"job-{next(self._id_counter)}"
         self._jobs[job_id] = _JobRecord(order=order)
+
+        if idempotency_key is not None:
+            self._idempotency_records[idempotency_key] = (
+                _IdempotentGenerationRecord(
+                    order=order,
+                    job_id=job_id,
+                )
+            )
+
         return job_id
+
+    @property
+    def job_count(self) -> int:
+        return len(self._jobs)
 
     def get_status(self, job_id: str) -> JobStatus:
         try:
@@ -57,4 +72,9 @@ class InMemoryGenerationService(GenerationService):
         job.polls_seen += 1
         if job.polls_seen <= self._pending_polls_before_terminal:
             return JobStatus.PENDING
-        return JobStatus.FAILED if self._should_fail(job.order) else JobStatus.SUCCESS
+
+        return (
+            JobStatus.FAILED
+            if self._should_fail(job.order)
+            else JobStatus.SUCCESS
+        )

@@ -138,7 +138,10 @@ def test_queue_retry_exhaustion_propagates_when_no_order_is_known():
             InMemoryArtifactRepository(),
             InMemoryResultPublisher(),
             UnresolvedOrderRegistry(),
-            retry=RetryConfig(max_attempts=2, initial_delay_seconds=0),
+            retry=RetryConfig(
+                max_attempts=2,
+                initial_delay_seconds=0,
+            ),
         )
 
     assert exc_info.value.operation == "order_queue.take"
@@ -146,12 +149,20 @@ def test_queue_retry_exhaustion_propagates_when_no_order_is_known():
 
 def test_worker_records_unresolved_order_and_continues():
     class AssetService(InMemoryGenerationService):
-        def queue(self, order):
+        def queue(self, order, idempotency_key=None):
             if order.order_id == "o1":
                 raise TransientError("asset dependency unavailable")
-            return super().queue(order)
 
-    orders = [Order(order_id="o1"), Order(order_id="o2")]
+            return super().queue(
+                order,
+                idempotency_key=idempotency_key,
+            )
+
+    orders = [
+        Order(order_id="o1"),
+        Order(order_id="o2"),
+    ]
+
     queue = InMemoryOrderQueue(orders)
     publisher = InMemoryResultPublisher()
     unresolved = UnresolvedOrderRegistry()
@@ -163,7 +174,10 @@ def test_worker_records_unresolved_order_and_continues():
         InMemoryArtifactRepository(),
         publisher,
         unresolved,
-        retry=RetryConfig(max_attempts=2, initial_delay_seconds=0),
+        retry=RetryConfig(
+            max_attempts=2,
+            initial_delay_seconds=0,
+        ),
     )
 
     assert taken_count == 2

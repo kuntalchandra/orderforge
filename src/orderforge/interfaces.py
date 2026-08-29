@@ -1,13 +1,8 @@
-"""
-The four interfaces the orchestrator depends on. In-memory implementations
-live under in_memory/; later phases/scope (DB-backed, real API) implement
-these same interfaces without the orchestrator changing.
+"""Interfaces used by the order orchestration client.
 
-GenerationService is used as TWO separate instances (one for asset
-generation, one for metadata generation) rather than one instance taking a
-"kind" parameter — the lifecycle shape (queue -> poll) is identical for
-both, but each kind has independent state, so two instances of the same
-interface is the right shape, not one instance branching internally.
+Phase 3 makes idempotency participation explicit for remote mutations.
+Callers may omit an idempotency key, but the worker composes wrappers that
+supply stable keys for generation triggers and terminal submissions.
 """
 
 from __future__ import annotations
@@ -15,7 +10,15 @@ from __future__ import annotations
 import abc
 from typing import List, Optional
 
-from .models import Asset, AssetDetail, FailedOrder, JobStatus, Metadata, Order, ShippableOrder
+from .models import (
+    Asset,
+    AssetDetail,
+    FailedOrder,
+    JobStatus,
+    Metadata,
+    Order,
+    ShippableOrder,
+)
 
 
 class OrderQueue(abc.ABC):
@@ -26,8 +29,12 @@ class OrderQueue(abc.ABC):
 
 class GenerationService(abc.ABC):
     @abc.abstractmethod
-    def queue(self, order: Order) -> str:
-        """Kick off generation for an order. Returns a job id."""
+    def queue(self, order: Order, idempotency_key: str | None = None) -> str:
+        """Kick off generation and return a job id.
+
+        When idempotency_key is supplied, repeating the same logical request
+        with that key must return the original job rather than create another.
+        """
 
     @abc.abstractmethod
     def get_status(self, job_id: str) -> JobStatus:
@@ -50,9 +57,17 @@ class ArtifactRepository(abc.ABC):
 
 class ResultPublisher(abc.ABC):
     @abc.abstractmethod
-    def submit_shippable(self, order: ShippableOrder) -> None:
-        ...
+    def submit_shippable(
+        self,
+        order: ShippableOrder,
+        idempotency_key: str | None = None,
+    ) -> None:
+        """Submit a shippable result, deduplicating when a key is supplied."""
 
     @abc.abstractmethod
-    def submit_failed(self, order: FailedOrder) -> None:
-        ...
+    def submit_failed(
+        self,
+        order: FailedOrder,
+        idempotency_key: str | None = None,
+    ) -> None:
+        """Submit a failed result, deduplicating when a key is supplied."""

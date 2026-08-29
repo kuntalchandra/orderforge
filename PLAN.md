@@ -1,143 +1,151 @@
 # PLAN.md — orderforge (Artifact Generation Exercise)
 
 ## Scope
-An exercise: build a client that ingests generic "Orders" from a queue,
-orchestrates two dependent async generation steps (Asset, Metadata) via a
-set of JSON-style APIs, and publishes a terminal result per order. Starts
-as an in-memory implementation. Designed so the scope can grow —
-persistence/repository, a real remote API — without rewriting the
-orchestration logic itself.
+Build a client that ingests generic `Order`s from a queue, orchestrates two
+dependent asynchronous generation steps (Asset, then Metadata), and publishes
+one terminal result per order. The first implementation is in-memory, while the
+interfaces are shaped so persistence and real remote APIs can replace those
+implementations later without rewriting the orchestration state machine.
 
-## NFR targets (assumed for this exercise, briefly justified)
+## NFR targets
 - Target throughput: 10,000 orders/min (~167/sec).
-- Little's Law: concurrency ≈ throughput × latency. With a short simulated
-  per-phase generation delay (50-300ms) and two sequential phases per
-  order (rule 2), end-to-end latency ≈ ~400ms, so sustaining 167/sec needs
-  roughly ~65-70 orders concurrently in flight.
-- Worker pool sized with headroom over that minimum (150 workers — see
-  "concurrency model" below for exactly what a "worker" is).
+- With ~400ms end-to-end latency, Little's Law gives roughly 65-70 orders in
+  flight to sustain that rate.
+- Phase 4 targets a bounded 150-thread worker pool to provide headroom for the
+  current I/O-bound model.
 
-## Architecture — decomposed for OCP
-Rather than one large "TestServer" interface with every method on it,
-split into small, focused, independently-swappable interfaces. The
-orchestrator depends only on these abstractions (constructor-injected).
-Extending scope later — DB-backed persistence, a real HTTP API — means
-writing a new class that implements an interface; it does not mean
-touching the orchestrator. That's the concrete mechanism for "open for
-extension, closed for modification":
+## End-to-end target flow
 
-- `OrderQueue` — `take() -> Order | None`
-- `GenerationService` — `queue(order) -> job_id`, `get_status(job_id)`.
-  One generic interface reused for both Asset and Metadata generation —
-  but only the *lifecycle* is identical (trigger a job, poll until
-  SUCCESS/FAILED). The *result content* is not: asset generation yields
-  N typed `Asset` records per order (1:many, per the data model),
-  metadata generation yields exactly one `Metadata` record (1:1). That
-  asymmetry is why result retrieval stays on a separate, non-generic
-  interface below rather than being forced into the same abstraction.
-- `ArtifactRepository` — read side: `get_assets`, `get_asset_detail`, `get_metadata`
-- `ResultPublisher` — write side: `submit_shippable`, `submit_failed`
+```text
+OrderQueue
+   |
+   | take / later reserve+ack
+   v
+Worker
+   |
+   | process one Order
+   v
+Asset Generation
+   |  stable idempotency key: generation:asset:<order_id>
+   |  retry transient interaction failures
+   |  poll job until SUCCESS / FAILED
+   |
+   +-- FAILED -----------------------------> FailedOrder(ASSET)
+   |
+   v SUCCESS
+ArtifactRepository
+   |  get assets + asset details
+   v
+Metadata Generation
+   |  stable idempotency key: generation:metadata:<order_id>
+   |  retry transient interaction failures
+   |  poll job until SUCCESS / FAILED
+   |
+   +-- FAILED -----------------------------> FailedOrder(METADATA)
+   |
+   v SUCCESS
+ArtifactRepository
+   |  get metadata
+   v
+ShippableOrder
+   |
+   | stable idempotency key: result:<order_id>
+   v
+ResultPublisher
 
-v1 implementations of all four are in-memory. Nothing about the
-orchestrator, worker pool, or tests refers to "in-memory" — they refer
-only to the interfaces.
+The retry wrapper is client-side. For mutating calls, the stable idempotency
+key travels with the request and the downstream service owns the authoritative
+idempotency record. That distinction matters for ambiguous outcomes: if the
+server commits the mutation but its response is lost, a retry with the same key
+must return/suppress the already-committed operation rather than perform it
+again.
 
-## Out of scope for now (not permanent — see roadmap)
-- Persistence across restarts — becomes its own phase once a DB/repository
-  is introduced
-- Distributed/multi-process workers — deferred, not excluded: at the
-  current NFR target the work is I/O-bound and single-process threading
-  covers the required concurrency with headroom (see NFR math above).
-  Revisited explicitly in the concurrency phase rather than dropped
-  silently.
-- Metrics/observability beyond structured logging — its own phase
+OrderQueue.take() is a different problem. A destructive work claim cannot be
+made recoverable by generation/result idempotency. The in-memory queue remains
+simple for now; Phase 4 makes its local take atomic across threads, while Phase
+9 introduces real reserve/lease + acknowledgement or equivalent visibility
+semantics when the queue becomes remote/persistent.
 
-## Fail-fast vs. fail-safe (carried over from prior work)
-- **Fail-fast**: order validation at ingestion/take time, and any
-  orchestration invariant violation (e.g. something attempting to queue
-  metadata generation for an order whose asset generation hasn't
-  succeeded) raises immediately and loudly. These are programming errors,
-  not business outcomes — they must never be caught and quietly ignored.
-- **Fail-safe, never silently**: a generation job reporting `FAILED` is an
-  expected business outcome, handled explicitly, logged with full context
-  (order id, stage, reason) and turned into a `FailedOrder`. It is never
-  swallowed and never mistaken for an error.
-- **Transient failures**: retried with backoff, but retry exhaustion and
-  any resulting "unresolved" order must stay visible — tracked in an
-  inspectable registry, not just a log line that scrolls away. In
-  production, a transient failure that keeps recurring against the same
-  downstream dependency isn't "still transient" — it's a dependency that's
-  actually down. Retry-with-backoff handles isolated blips; a circuit
-  breaker is what handles the dependency-is-down case, so the client stops
-  hammering it and fails fast for a cooldown window instead of queuing up
-  retries that are all going to fail anyway.
+Architecture — decomposed for OCP
 
-## Concurrency model
-Single process. A bounded thread pool where each thread is one worker,
-looping `queue.take() -> process(order)` independently. Work is I/O-bound
-(simulated delay now, real network calls later), so threads release the
-GIL while waiting and scale without multiprocessing overhead at the
-current NFR target. Every piece of shared in-memory state that multiple
-worker threads touch concurrently — the queue, the idempotency dedup
-cache, the result store — needs an explicit locking strategy; this is not
-automatic just because it's "in-memory," and is scoped as part of Phase 4
-rather than assumed away.
+The orchestrator depends on four focused abstractions:
 
-## Incremental roadmap — one phase, one reviewed PR
-Each phase ships intentionally incomplete — gaps left for review, fixed in
-the next phase based on your feedback, same reverse-shadow pattern as the
-feature-flag library drills.
+OrderQueue — take() -> Order | None
+GenerationService — queue(order, idempotency_key=None) -> job_id,
+get_status(job_id). Asset and Metadata use separate instances.
+ArtifactRepository — get_assets, get_asset_detail, get_metadata
+ResultPublisher — submit_shippable(..., idempotency_key=None),
+submit_failed(..., idempotency_key=None)
 
-1. **Basic implementation** — the four interfaces + in-memory
-   implementations + orchestrator (rules 1-6) + a single-threaded worker
-   loop. No retry, no idempotency yet. **DONE — committed.**
-2. **Robust retry mechanism** — backoff for transient errors, applied
-   uniformly across all four interfaces via one wrapper, not per-call.
-   Retry exhaustion after an order is known is recorded in an explicitly
-   injected unresolved-order registry so the state remains inspectable.
-   **DONE — reviewed and revised.**
-3. **Idempotency** — dedup cache for generation triggers and result
-   submissions, closing the "retry after an ambiguous timeout" gap.
-4. **Concurrency** — multi-threaded worker pool sized per the NFR math,
-   **plus an explicit locking strategy for every piece of shared in-memory
-   state**: atomic take from `OrderQueue`, a lock around the
-   idempotency dedup cache's check-then-act (queue-if-absent), and a lock
-   around `ResultPublisher` appends. Also an explicit revisit of whether
-   multi-process/distributed is justified yet (it isn't, at this NFR
-   target — see concurrency model above).
-5. **Caching** — a read-through cache in front of `ArtifactRepository`,
-   revisited meaningfully once a real repository/API exists.
-6. **Circuit breaker** — wraps `GenerationService` calls; trips on
-   sustained failure, fails fast + cooldown instead of retrying into a
-   known-down dependency.
-7. **Backpressure / bounded intake** — 10K RPM is an assumed ceiling;
-   decide what happens when intake exceeds worker capacity (bounded queue
-   + explicit reject/park vs. unbounded growth).
-8. **Observability** — structured metrics (taken / succeeded /
-   failed-by-stage / unresolved counts) so "no error stays silent" is
-   actually queryable, not just logged.
-9. **Persistence + real API** (later, beyond this exercise's core) —
-   DB-backed repository and a real HTTP client, slotted in behind the
-   existing interfaces per the OCP design; the payoff of phases 1-8 being
-   interface-first is that this phase touches no orchestration code.
+The optional idempotency parameter expresses a downstream capability without
+forcing direct callers to supply one. The worker composes idempotent wrappers
+for the mutating operations before handing the services to the orchestrator.
+The orchestrator therefore stays focused on rules 1-6 rather than key creation.
 
-## Testing strategy
-`pytest`, matching the convention already established for the feature-flag
-library. Each phase adds tests scoped to what it introduces; prior-phase
-tests (rules 1-6, etc.) are never deleted, only built on. Rules 1-6 are a
-natural fit for `@pytest.mark.parametrize` — one table-driven test instead
-of near-duplicate methods per rule.
+Failure model
+Programming/invariant errors: fail fast and propagate.
+Generation FAILED: expected business outcome; publish the appropriate
+FailedOrder according to rules 4/5.
+Transient interaction errors: retry with exponential backoff.
+Retry exhaustion after an order is known: record the order in the
+inspectable unresolved registry; do not manufacture a business failure.
+Idempotency conflict: fail fast. Reusing the same key for a different
+logical mutation or terminal payload indicates a correctness violation.
+Ambiguous mutation response: safe only when the downstream mutation
+participates in idempotency with the stable key supplied by the client.
+Concurrency model
 
-## Deviation log
-- **Phase 2 review clarification — unresolved registry lifecycle:** the first
-  retry design allowed `worker.run()` to create a registry internally. Review
-  exposed that the registry then disappeared on return, violating the plan's
-  inspectability requirement. The registry is now an explicit required
-  dependency. This is a plan-implementation correction, not a scope change.
-- **Roadmap risk discovered — ambiguous `OrderQueue.take()`:** Phase 2 retries
-  `take()` uniformly as required, but a destructive remote take can succeed
-  server-side and lose its response; retrying may then take a different order.
-  Phase 3's generation/submission idempotency does not by itself close this
-  gap. Revisit queue semantics in Phase 3: reserve/lease + acknowledgement,
-  visibility timeout, or an equivalent recoverable claim protocol. No queue
-  protocol is introduced in Phase 2 because the current queue is in-memory.
+Single process. Phase 4 introduces a bounded thread pool where each thread loops
+queue.take() -> process(order). Shared in-memory state then requires explicit
+locking: queue claiming, generation idempotency records, result idempotency
+records/result lists, and the unresolved registry. Locking is not pulled into
+Phase 3 because the worker is still single-threaded.
+
+Incremental roadmap — one phase, one reviewed PR
+Basic implementation — interfaces, in-memory implementations,
+orchestrator rules 1-6, single-threaded worker. DONE — committed.
+Robust retry — generic retry/backoff across external-facing interfaces;
+explicit unresolved registry and dependency-qualified retry errors.
+DONE — committed.
+Idempotency — stable keys for generation triggers and terminal result
+submissions; downstream services own the authoritative idempotency record;
+duplicate identical mutations are safe, conflicting reuse fails fast.
+Explicitly separate mutation idempotency from queue-claim recoverability.
+DONE — reviewed and revised.
+Concurrency — bounded worker pool plus explicit locking for every shared
+in-memory structure. Make in-memory queue take atomic. Re-test all Phase 3
+check-then-act paths under concurrent calls.
+Caching — read-through cache for repository reads; define freshness,
+invalidation, and stampede behaviour.
+Circuit breaker — stop retrying into a known-down dependency; define
+closed/open/half-open transitions and interaction with retry.
+Backpressure — bound intake/work queues and define reject/park/fairness
+behaviour when offered load exceeds worker capacity.
+Observability — structured metrics for taken, succeeded, failed by stage,
+retry exhaustion, idempotency conflicts, latency, and unresolved orders.
+Persistence + real API/queue — replace in-memory adapters with persistent
+repository/remote clients. Add durable queue reserve/lease + ack/visibility
+semantics and durable downstream idempotency records where required.
+Testing strategy
+
+pytest. Each phase adds behavioural contracts and retains earlier tests.
+Failure-path tests must model ambiguous outcomes explicitly, not only ordinary
+pre-side-effect exceptions.
+
+Deviation / decision log
+Phase 2 — unresolved registry lifecycle: an internally-created registry
+became unreachable after run() returned. It is now an explicit dependency.
+Phase 2 — ambiguous OrderQueue.take(): retrying a destructive remote
+take could lose Order A and then return Order B. Carried into Phase 3 for an
+architectural decision rather than hidden by generic retry.
+Phase 3 — client cache rejected as strong idempotency: the first design
+wrote a local dedup entry only after the downstream call returned. If the
+server committed and the response was lost, retry saw no local entry and
+repeated the mutation. The fix moves authoritative idempotency participation
+to the downstream mutation contract and sends stable keys with retries.
+Phase 3 — duplicate vs conflict: identical replay with the same key is a
+no-op/reuse; the same key with a different order, terminal kind, or payload is
+an IdempotencyConflictError and fails fast.
+Phase 3 — queue claim decision: mutation idempotency does not solve work
+claiming. Phase 4 provides thread-safe local claiming; durable reserve/ack or
+visibility-timeout semantics belong to Phase 9 when the queue becomes real.

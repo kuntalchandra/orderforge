@@ -1,4 +1,4 @@
-"""Phase 2 worker: single-threaded queue draining with uniform retry."""
+"""Phase 3 worker: retry composed around idempotent downstream mutations."""
 
 from __future__ import annotations
 
@@ -6,7 +6,16 @@ from dataclasses import dataclass
 from typing import List
 
 from .exceptions import RetryExhaustedError
-from .interfaces import ArtifactRepository, GenerationService, OrderQueue, ResultPublisher
+from .idempotency import (
+    IdempotentGenerationService,
+    IdempotentResultPublisher,
+)
+from .interfaces import (
+    ArtifactRepository,
+    GenerationService,
+    OrderQueue,
+    ResultPublisher,
+)
 from .models import Order
 from .orchestrator import PollConfig, process_order
 from .retry import RetryingProxy, RetryConfig
@@ -54,44 +63,52 @@ def run(
     poll: PollConfig = PollConfig(),
     retry: RetryConfig = RetryConfig(),
 ) -> int:
-    """Drain the queue and return the number of orders taken from it.
+    """Drain the queue and return the number of orders taken from it."""
+    queue = RetryingProxy(
+        queue,
+        config=retry,
+        dependency_name="order_queue",
+    )
 
-    Retry exhaustion after an order has been taken is recorded as unresolved,
-    and processing continues with the next order. The registry is a required
-    dependency so unresolved state cannot disappear when this function returns.
-
-    If queue.take() itself exhausts retries, no order identity is available to
-    record, so RetryExhaustedError propagates to the caller.
-    """
-    queue = RetryingProxy(queue, config=retry, dependency_name="order_queue")
     asset_generation_service = RetryingProxy(
-        asset_generation_service,
+        IdempotentGenerationService(
+            asset_generation_service,
+            stage="asset",
+        ),
         config=retry,
         dependency_name="asset_generation",
     )
+
     metadata_generation_service = RetryingProxy(
-        metadata_generation_service,
+        IdempotentGenerationService(
+            metadata_generation_service,
+            stage="metadata",
+        ),
         config=retry,
         dependency_name="metadata_generation",
     )
+
     repository = RetryingProxy(
         repository,
         config=retry,
         dependency_name="artifact_repository",
     )
+
     publisher = RetryingProxy(
-        publisher,
+        IdempotentResultPublisher(publisher),
         config=retry,
         dependency_name="result_publisher",
     )
 
     taken_count = 0
+
     while True:
         order = queue.take()
         if order is None:
             break
 
         taken_count += 1
+
         try:
             process_order(
                 order,
