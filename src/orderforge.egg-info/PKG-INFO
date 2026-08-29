@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: orderforge
+Version: 0.1.0
+Summary: Exercise: ingests Orders from a queue, orchestrates Asset/Metadata generation, publishes ShippableOrder/FailedOrder results.
+Requires-Python: >=3.10
