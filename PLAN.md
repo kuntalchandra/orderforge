@@ -671,40 +671,198 @@ PyBreaker.
 
 DONE — implemented using PyBreaker.
 
-7. Backpressure
+7. External JSON API integration + project closure
 
-Bound intake/work queues and define reject/park/fairness behaviour when offered load exceeds worker capacity.
+Replace the in-memory external boundaries with thin HTTP/JSON adapters matching
+the exercise API contract while preserving the orchestration and resilience
+layers already established in Phases 1-6.
 
 Guarantee:
 
-Offered load above processing capacity does not create unbounded resource growth.
+Real remote API interactions can replace the in-memory adapters without
+rewriting the Order state machine or weakening the failure-handling guarantees
+established in earlier phases.
 
-8. Observability
+Scope
 
-Structured metrics for:
+Implement or demonstrate adapters for the existing interfaces:
 
-taken
-succeeded
-failed by stage
-retry exhaustion
-idempotency conflicts
-latency
+HttpOrderQueue
+    take()
+
+HttpGenerationService
+    queue(order, idempotency_key=None)
+    get_status(job_id)
+
+HttpArtifactRepository
+    get_assets(order_id)
+    get_asset_detail(asset_id, order_id)
+    get_metadata(order_id)
+
+HttpResultPublisher
+    submit_shippable(..., idempotency_key=None)
+    submit_failed(..., idempotency_key=None)
+
+These adapters own transport concerns only:
+
+domain request
+    |
+    v
+JSON / HTTP request
+    |
+    v
+remote API
+    |
+    v
+HTTP / transport response
+    |
+    v
+domain result or Orderforge exception
+
+The orchestrator remains unaware of HTTP.
+
+Transport failure mapping
+
+Remote interaction failures should map into the existing Orderforge failure
+model rather than introducing transport-specific behaviour into the
+orchestrator.
+
+Examples:
+
+connection timeout
+connection reset
+temporary 5xx response
+        |
+        v
+TransientError
+        |
+        v
+RetryingProxy
+        |
+        v
+retry exhaustion if unavailable long enough
+
+Programming, malformed-response and contract violations should fail explicitly
+rather than being misclassified as temporary dependency outages.
+
+HTTP library decision
+
+Use a mature HTTP client library rather than implementing networking,
+connection pooling or transport retry machinery from scratch.
+
+Orderforge owns:
+
+request/response mapping
+timeouts
+failure classification
+idempotency-key propagation
+integration with the existing resilience stack
+
+The HTTP library owns the underlying transport implementation.
+
+Backpressure — design decision only
+
+No application-level backpressure subsystem is added.
+
+In a production queue-backed system, excess work should normally remain in the
+durable upstream queue rather than being eagerly consumed into an internal
+application backlog.
+
+The primary controls would normally include queue or consumer configuration
+such as:
+
+consumer concurrency
+prefetch / maximum outstanding delivery
+unacknowledged-message limits
+visibility / lease semantics where applicable
+
+When downstream processing slows:
+
+workers remain occupied longer
+        |
+        v
+acknowledgements / claims slow
+        |
+        v
+queue delivery slows
+        |
+        v
+backlog remains upstream
+
+Worker-pool capacity, downstream connection-pool capacity and queue delivery
+configuration should be tuned together.
+
+A separate Orderforge semaphore would duplicate part of that responsibility
+without representing the real production ownership boundary.
+
+Observability — design decision only
+
+No custom metrics framework is implemented.
+
+A production implementation should expose the existing guarantees through the
+organisation's standard logging, metrics and tracing stack.
+
+Relevant signals include:
+
+orders taken
+terminal success
+business failure by generation stage
 unresolved orders
-relevant concurrency/cache behaviour
+retry exhaustion
+circuit-open events / breaker transitions
+dependency latency
+end-to-end order latency
+queue backlog / lag
+cache behaviour where operationally useful
 
-Guarantee:
+Observability is treated as instrumentation of the system rather than another
+domain subsystem.
 
-The system's correctness, reliability and performance guarantees can be observed rather than inferred from logs after failure.
+Queue ownership semantics
 
-9. Persistence + real API/queue
+The exercise-level OrderQueue.take() contract remains unchanged.
 
-Replace in-memory adapters with persistent repository/remote clients.
+A real production queue may require stronger semantics such as:
 
-Add durable queue reserve/lease + ack/visibility semantics and durable downstream idempotency records where required.
+reserve / lease
+visibility timeout
+acknowledgement
+redelivery
+dead-letter handling
 
-Guarantee:
+Those semantics are not simulated inside Orderforge merely to make the
+in-memory implementation appear production-grade.
 
-The guarantees established in earlier phases survive real network ambiguity, process failure and restart boundaries.
+When a real queue adapter is introduced, the adapter must honour the semantics
+of that queue technology.
+
+Persistence boundary
+
+Orderforge does not add a database merely to persist infrastructure state.
+
+Authoritative mutation idempotency remains owned by the downstream mutation
+owner, as established in Phase 3.
+
+Circuit-breaker state remains process-local in the current design.
+
+Cache state remains process-local and disposable.
+
+Unresolved-order durability would become an integration decision when the
+system is connected to real persistence or operational recovery workflows.
+
+Project closure criterion
+
+Phase 7 is complete when:
+
+the external JSON API boundary is represented by real/thin adapters
+the existing orchestration does not need structural rewriting
+transport failures feed the existing resilience model correctly
+idempotency keys are propagated where supported
+adapter-level behavioural tests cover the important mappings
+the remaining production concerns are explicitly documented rather than
+reimplemented as exercise infrastructure
+
+DONE when reviewed and integrated.
 
 Testing strategy
 
@@ -987,4 +1145,107 @@ Orders may rapidly become unresolved.
 
 Controlling intake when offered load or downstream capacity is insufficient is
 a separate concern and remains Phase 7 backpressure.
+
+Roadmap scope cut after Phase 6
+
+The original roadmap proposed separate phases for:
+
+backpressure
+observability
+persistence + real API/queue
+
+After completing Phases 1-6, that scope was deliberately reduced.
+
+The project already covers the core correctness and application-resilience
+concepts:
+
+state-machine correctness
+retry
+ambiguous failures
+idempotency
+concurrency
+cache stampede / freshness
+circuit breaking
+build-vs-reuse judgement
+
+Continuing to implement queue infrastructure, a metrics subsystem and durable
+coordination would expand the exercise beyond its primary learning and problem
+requirements.
+
+Those topics remain important production concerns, but implementation is not
+automatically the right way to learn or demonstrate them.
+
+
+Phase 7 — queue backpressure responsibility
+
+An application-level admission semaphore was considered and rejected.
+
+For a production pull-based queue, the durable queue should normally remain the
+backlog.
+
+Consumer concurrency, prefetch / outstanding-delivery limits and acknowledgement
+behaviour should prevent the application from claiming substantially more work
+than it can process.
+
+This keeps excess work in infrastructure designed to retain and recover it
+rather than creating another application-side backlog.
+
+Application-specific bulkheads may still be useful when individual downstream
+dependencies have much smaller concurrency limits, but that is distinct from
+generic queue backpressure.
+
+
+Phase 7 — rate limiting vs backpressure
+
+A fixed publish or consume rate is a rate-control policy.
+
+Backpressure is the dynamic effect where slower downstream processing reduces
+the rate at which upstream work can safely progress.
+
+The concepts interact but are not equivalent.
+
+Queue configuration should be chosen so that downstream slowdown naturally
+reduces work acquisition rather than merely buffering more work inside the
+process.
+
+
+Phase 7 — observability scope
+
+Metrics, logs and traces are required in a real production system, but
+Orderforge does not need to implement its own observability framework.
+
+The valuable design task is identifying which guarantees must be measurable and
+where instrumentation belongs.
+
+Production code should integrate those signals with the organisation's existing
+observability stack.
+
+
+Phase 7 — persistence scope
+
+Persistence is introduced only where a real ownership or recovery requirement
+demands it.
+
+A local persistence layer cannot repair an ambiguous remote mutation unless the
+actual side-effect owner participates in the idempotency protocol.
+
+Likewise, simulating durable queue reserve / ack semantics locally would not
+prove correctness against a real queue.
+
+The final phase therefore focuses on real integration boundaries rather than
+inventing substitutes for external infrastructure.
+
+
+Phase 7 — final build-vs-reuse principle
+
+The Phase 6 circuit-breaker review reinforced a broader project rule:
+
+understanding a mechanism does not imply Orderforge should implement that
+mechanism.
+
+Commodity infrastructure should normally be reused when a mature implementation
+exists.
+
+Custom code should concentrate on Orderforge-specific contracts, integration
+policy, failure semantics and state-machine correctness.
 
