@@ -1,6 +1,10 @@
 """Domain, interaction, and idempotency exceptions."""
 
 
+class CircuitOpenError(Exception):
+    """Dependency call was rejected because its circuit is open."""
+
+    
 class OrderValidationError(Exception):
     """Raised immediately for a structurally invalid Order."""
 

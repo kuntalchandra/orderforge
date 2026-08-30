@@ -396,13 +396,280 @@ DONE — reviewed and corrected.
 
 6. Circuit breaker
 
-Stop retrying into a known-down dependency.
-
-Define closed/open/half-open transitions and interaction with retry.
+Protect external-facing operations from repeated calls into dependency
+operations already known to be unhealthy.
 
 Guarantee:
 
-A known-unhealthy dependency does not cause every worker to continue spending resources on predictably failing calls.
+A dependency operation that repeatedly exhausts its retry budget is temporarily
+removed from the request path. Subsequent workers fail fast rather than
+continuing to spend retry capacity on a predictably unhealthy integration
+point.
+
+Library decision — build vs reuse
+
+Phase 6 uses PyBreaker rather than implementing the CLOSED / OPEN / HALF_OPEN
+state machine inside Orderforge.
+
+Circuit state transitions, failure counters, recovery timing, half-open probing
+and thread-safety are commodity resilience mechanisms. Reimplementing them would
+add concurrency and lifecycle correctness risk without adding Orderforge domain
+value.
+
+Orderforge still owns the decisions specific to this system:
+
+breaker placement relative to retry and cache
+breaker granularity / health boundaries
+which exceptions represent dependency-health failures
+what an open circuit means for an Order
+configuration
+future metrics and operational visibility
+
+The earlier custom implementation review was still useful because it exposed
+the complexity hidden behind a circuit breaker: concurrent state transitions,
+half-open probe ownership and stale in-flight completions.
+
+Understanding those mechanisms is useful. Owning another implementation of
+them is not required.
+
+Breaker outside retry — logical failure vs physical attempt
+
+Composition:
+
+CircuitBreakingProxy
+        |
+        v
+RetryingProxy
+        |
+        v
+Dependency
+
+The breaker therefore observes the result of one logical dependency operation
+after RetryingProxy consumes its retry budget.
+
+For example:
+
+retry max_attempts = 3
+breaker failure_threshold = 5
+
+One logical call may make three physical dependency attempts.
+
+If all three attempts fail, RetryingProxy raises one RetryExhaustedError and
+PyBreaker records one circuit failure.
+
+The opposite composition:
+
+RetryingProxy
+        |
+        v
+CircuitBreaker
+        |
+        v
+Dependency
+
+would allow individual physical retry attempts to advance circuit health state.
+
+One caller could therefore consume several breaker failures during its own retry
+sequence.
+
+Phase 6 intentionally measures dependency health at logical-operation
+granularity.
+
+Failure classification — not every exception means dependency failure
+
+Only RetryExhaustedError contributes to circuit health.
+
+RetryExhaustedError represents a transient dependency interaction that remained
+unavailable after consuming its retry budget.
+
+That is meaningful evidence of dependency-health degradation.
+
+Validation errors, business errors, idempotency conflicts and invariant /
+programming errors propagate normally but do not advance the breaker.
+
+Conceptually:
+
+retry-exhausted interaction failure
+    ->
+dependency-health signal
+
+business / validation / invariant failure
+    ->
+propagate
+    ->
+not a dependency-health signal
+
+Opening an availability circuit because of invalid application input would
+misclassify correctness failure as dependency failure.
+
+CircuitOpenError — availability control signal, not business outcome
+
+PyBreaker's CircuitBreakerError is translated at the Orderforge boundary into
+CircuitOpenError.
+
+Orderforge therefore does not leak a third-party library exception through its
+worker/orchestration contracts.
+
+For an Order already acquired from the queue:
+
+RetryExhaustedError
+CircuitOpenError
+        |
+        v
+UnresolvedOrderRegistry
+
+Neither condition creates FailedOrder.
+
+A circuit being open means the dependency operation was deliberately not
+attempted. It does not prove that Asset or Metadata generation reached its
+FAILED business state.
+
+For OrderQueue.take(), no reliable Order has yet been acquired. An open queue
+circuit therefore follows the existing queue-level failure path and triggers
+coordinated worker shutdown.
+
+Breaker granularity — shared across workers, isolated by operation
+
+Breaker instances are shared by all workers but isolated by logical dependency
+operation.
+
+Current operation boundaries:
+
+order_queue.take
+
+asset_generation.queue
+asset_generation.get_status
+
+metadata_generation.queue
+metadata_generation.get_status
+
+artifact_repository.get_assets
+artifact_repository.get_asset_detail
+artifact_repository.get_metadata
+
+result_publisher.submit_shippable
+result_publisher.submit_failed
+
+Conceptually:
+
+all workers
+    |
+    v
+same dependency operation
+    |
+    v
+same breaker
+
+A breaker per worker or per Order would be ineffective because each worker
+would independently rediscover the same outage.
+
+A single breaker for an entire interface can create unnecessary blast radius.
+
+For example:
+
+artifact_repository.get_metadata fails
+        |
+        X
+should not automatically imply
+        |
+artifact_repository.get_assets is unavailable
+
+Phase 6 therefore starts with operation-level breakers.
+
+Health boundaries can later be consolidated if production behaviour proves
+several operations always fail and recover together.
+
+Cache interaction
+
+Repository composition becomes:
+
+CachingArtifactRepository
+          |
+          | cache miss
+          v
+CircuitBreakingProxy
+          |
+          v
+RetryingProxy
+          |
+          v
+ArtifactRepository
+
+A cache hit therefore avoids:
+
+repository access
+retry
+circuit-breaker health accounting
+
+Only a real dependency interaction participates in circuit-health decisions.
+
+This preserves the Phase 5 principle that cached reads should not consume
+resilience capacity intended for remote dependency interactions.
+
+Idempotency interaction
+
+The existing Phase 3 mutation idempotency remains unchanged.
+
+The current composition is:
+
+CircuitBreakingProxy
+        |
+        v
+RetryingProxy
+        |
+        v
+IdempotentGenerationService / IdempotentResultPublisher
+        |
+        v
+Dependency
+
+Retry continues to reuse the stable idempotency key established in Phase 3.
+
+Circuit breaking decides whether an interaction should currently be attempted.
+It does not solve ambiguous mutation outcomes and does not replace downstream
+authoritative idempotency.
+
+Shared-state scope
+
+Circuit breaker instances are created once inside run() and shared by the
+worker pool for that run.
+
+They are not created per worker or per Order.
+
+Phase 6 remains single-process. Circuit health is therefore process-local.
+
+Distributed breaker state is deliberately not introduced. Whether breaker
+health should be shared between processes is a separate operational decision
+rather than an automatic improvement.
+
+Recovery semantics
+
+CLOSED
+
+Calls flow normally.
+
+Once the configured logical failure threshold is reached, PyBreaker opens the
+circuit.
+
+OPEN
+
+Calls fail fast without invoking the protected operation.
+
+After the configured recovery timeout, PyBreaker manages the HALF_OPEN recovery
+behaviour.
+
+HALF_OPEN
+
+Controlled recovery traffic determines whether the dependency has recovered.
+
+Successful recovery closes the circuit.
+
+Failed recovery opens it again.
+
+Orderforge delegates these concurrency-sensitive state transitions to
+PyBreaker.
+
+DONE — implemented using PyBreaker.
 
 7. Backpressure
 
@@ -631,3 +898,93 @@ get_metadata(order_id)
 The decorator was corrected to preserve that interface exactly rather than forcing caching-specific assumptions onto existing callers.
 reinforced that passing tests do not independently prove interface conformance
 when a relevant path is insufficiently exercised.
+
+Phase 6 — build vs reuse
+
+The first Phase 6 design explored implementing the circuit-breaker state machine
+inside Orderforge.
+
+Reviewing that approach exposed significant concurrency and lifecycle
+complexity, including CLOSED / OPEN / HALF_OPEN transitions, recovery-probe
+ownership and stale in-flight completions.
+
+That implementation direction was deliberately discarded before commit.
+
+Phase 6 instead uses PyBreaker and limits Orderforge code to integration policy.
+
+The design lesson is to distinguish understanding an infrastructure mechanism
+from needing to own its implementation.
+
+Build vs reuse should be an explicit engineering decision.
+
+
+Phase 6 — retry vs circuit-breaker ordering
+
+CircuitBreakingProxy wraps RetryingProxy.
+
+The breaker therefore sees one RetryExhaustedError after a complete retry
+sequence as one failed logical operation.
+
+It does not count every physical retry attempt as an independent breaker
+failure.
+
+This prevents one caller's retry loop from consuming several breaker failures.
+
+
+Phase 6 — exception classification
+
+Not every exception means that a dependency is unhealthy.
+
+Only RetryExhaustedError contributes to circuit health.
+
+Validation, business, idempotency and invariant errors propagate without
+advancing the circuit.
+
+This avoids opening an availability circuit because of application-level
+correctness failures.
+
+
+Phase 6 — breaker granularity
+
+Breaker state is shared across workers but isolated by logical dependency
+operation.
+
+A per-worker breaker would allow every worker to independently rediscover the
+same outage.
+
+A single breaker across unrelated operations can create unnecessary blast
+radius by allowing one failing endpoint to block another healthy endpoint.
+
+Phase 6 therefore starts with operation-level breakers.
+
+Those health boundaries can be consolidated later if production evidence shows
+that several operations always fail and recover together.
+
+
+Phase 6 — open circuit is unresolved, not FAILED
+
+CircuitOpenError means Orderforge deliberately did not invoke a dependency
+because recent interaction history indicates that operation is unhealthy.
+
+It does not prove Asset or Metadata generation reached its FAILED domain state.
+
+For an already-known Order, the condition is recorded in
+UnresolvedOrderRegistry.
+
+For OrderQueue.take(), where no Order has safely been acquired, the condition
+is treated as an intake-level worker failure.
+
+
+Phase 6 — circuit breaker does not provide backpressure
+
+Fail-fast protection prevents workers from repeatedly spending retry capacity
+on a known-unhealthy operation.
+
+It does not control how quickly new work is acquired.
+
+If workers continue taking Orders while a downstream circuit is open, many
+Orders may rapidly become unresolved.
+
+Controlling intake when offered load or downstream capacity is insufficient is
+a separate concern and remains Phase 7 backpressure.
+

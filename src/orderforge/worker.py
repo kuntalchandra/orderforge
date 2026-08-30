@@ -22,7 +22,13 @@ from typing import List
 
 from .cache import TTLCache
 from .caching import CachingArtifactRepository
-from .exceptions import RetryExhaustedError
+
+from .circuit_breaker import (
+    CircuitBreakerConfig,
+    CircuitBreakingProxy,
+    build_operation_breakers,
+)
+from .exceptions import CircuitOpenError, RetryExhaustedError
 from .idempotency import (
     IdempotentGenerationService,
     IdempotentResultPublisher,
@@ -39,7 +45,6 @@ from .retry import RetryingProxy, RetryConfig
 
 
 DEFAULT_WORKER_POOL_SIZE = 150
-
 
 @dataclass(frozen=True)
 class UnresolvedOrder:
@@ -60,11 +65,15 @@ class UnresolvedOrderRegistry:
     def record(
         self,
         order: Order,
-        error: RetryExhaustedError,
+        error: BaseException,
     ) -> None:
         unresolved = UnresolvedOrder(
             order=order,
-            operation=error.operation,
+            operation=getattr(
+                error,
+                "operation",
+                "circuit_breaker",
+            ),
             reason=str(error),
         )
 
@@ -98,7 +107,10 @@ def _worker_loop(
     while not stop_event.is_set():
         try:
             order = queue.take()
-        except RetryExhaustedError as exc:
+        except (
+            RetryExhaustedError,
+            CircuitOpenError,
+        ) as exc:
             with first_error_lock:
                 if not first_error_box:
                     first_error_box.append(exc)
@@ -120,7 +132,10 @@ def _worker_loop(
                 publisher,
                 poll,
             )
-        except RetryExhaustedError as exc:
+        except (
+            RetryExhaustedError,
+            CircuitOpenError,
+        ) as exc:
             unresolved.record(order, exc)
 
     return taken_count
@@ -136,49 +151,104 @@ def run(
     poll: PollConfig = PollConfig(),
     retry: RetryConfig = RetryConfig(),
     num_workers: int = DEFAULT_WORKER_POOL_SIZE,
+    circuit_breaker: CircuitBreakerConfig | None = None,
 ) -> int:
     """Drain the queue concurrently and return total orders taken."""
 
     if num_workers < 1:
         raise ValueError("num_workers must be >= 1")
 
-    queue = RetryingProxy(
-        queue,
-        config=retry,
+    breaker_config = (
+        circuit_breaker
+        if circuit_breaker is not None
+        else CircuitBreakerConfig()
+    )
+
+    queue = CircuitBreakingProxy(
+        RetryingProxy(
+            queue,
+            config=retry,
+            dependency_name="order_queue",
+        ),
         dependency_name="order_queue",
+        breakers=build_operation_breakers(
+            ["take"],
+            breaker_config,
+        ),
     )
 
-    asset_generation_service = RetryingProxy(
-        IdempotentGenerationService(
-            asset_generation_service,
-            stage="asset",
+    asset_generation_service = CircuitBreakingProxy(
+        RetryingProxy(
+            IdempotentGenerationService(
+                asset_generation_service,
+                stage="asset",
+            ),
+            config=retry,
+            dependency_name="asset_generation",
         ),
-        config=retry,
         dependency_name="asset_generation",
+        breakers=build_operation_breakers(
+            [
+                "queue",
+                "get_status",
+            ],
+            breaker_config,
+        ),
     )
 
-    metadata_generation_service = RetryingProxy(
-        IdempotentGenerationService(
-            metadata_generation_service,
-            stage="metadata",
+    metadata_generation_service = CircuitBreakingProxy(
+        RetryingProxy(
+            IdempotentGenerationService(
+                metadata_generation_service,
+                stage="metadata",
+            ),
+            config=retry,
+            dependency_name="metadata_generation",
         ),
-        config=retry,
         dependency_name="metadata_generation",
+        breakers=build_operation_breakers(
+            [
+                "queue",
+                "get_status",
+            ],
+            breaker_config,
+        ),
     )
 
     repository = CachingArtifactRepository(
-        RetryingProxy(
-            repository,
-            config=retry,
+        CircuitBreakingProxy(
+            RetryingProxy(
+                repository,
+                config=retry,
+                dependency_name="artifact_repository",
+            ),
             dependency_name="artifact_repository",
+            breakers=build_operation_breakers(
+                [
+                    "get_assets",
+                    "get_asset_detail",
+                    "get_metadata",
+                ],
+                breaker_config,
+            ),
         ),
         TTLCache(),
     )
 
-    publisher = RetryingProxy(
-        IdempotentResultPublisher(publisher),
-        config=retry,
+    publisher = CircuitBreakingProxy(
+        RetryingProxy(
+            IdempotentResultPublisher(publisher),
+            config=retry,
+            dependency_name="result_publisher",
+        ),
         dependency_name="result_publisher",
+        breakers=build_operation_breakers(
+            [
+                "submit_shippable",
+                "submit_failed",
+            ],
+            breaker_config,
+        ),
     )
 
     stop_event = threading.Event()
