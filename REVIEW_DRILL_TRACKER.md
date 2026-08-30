@@ -181,3 +181,209 @@ lock?" Use:
 
 The key Phase 4 lesson: locking too broadly can be as architecturally wrong
 as failing to lock at all.
+
+## Phase 6-7 — Resilience and production-boundary review
+
+### Build vs reuse became part of the review
+
+Circuit-breaker review initially moved into implementing CLOSED / OPEN /
+HALF_OPEN state management directly.
+
+That exposed real concurrency questions:
+
+- transition ownership
+- half-open probe ownership
+- stale in-flight completions
+- concurrent failure accounting
+- recovery timing
+
+The implementation was deliberately replaced with PyBreaker.
+
+Review lesson:
+
+Understanding infrastructure internals is useful, but implementation ownership
+must still be justified.
+
+A mature library can own commodity state-machine mechanics while Orderforge
+owns integration policy.
+
+
+### Logical failure vs physical retry attempt
+
+Circuit breaking is placed outside retry.
+
+One caller may make several physical attempts, but the breaker sees one logical
+failure only after the retry budget is exhausted.
+
+Review lesson:
+
+Before counting failures, identify what the counter represents.
+
+Physical attempts and logical operations are different units.
+
+
+### Exception classification is part of resilience design
+
+Only retry-exhausted dependency interaction failures contribute to circuit
+health.
+
+Business, validation, idempotency and invariant failures do not imply that a
+dependency is unavailable.
+
+Review lesson:
+
+Exception handling is not only control flow.
+
+The exception taxonomy determines how resilience mechanisms interpret system
+health.
+
+
+### Breaker scope is an architectural boundary
+
+Per-worker breakers would make every worker independently rediscover an outage.
+
+One breaker for all operations would allow one failing operation to disable
+unrelated healthy operations.
+
+Phase 6 therefore starts with shared operation-level breakers.
+
+Review lesson:
+
+Shared-state scope determines failure isolation and blast radius.
+
+
+### Circuit breaker does not replace idempotency
+
+Circuit breaking decides whether an operation should currently be attempted.
+
+Idempotency determines whether repeated mutation attempts can safely represent
+one logical mutation.
+
+Review lesson:
+
+Resilience mechanisms solve different failure dimensions and should not be
+treated as interchangeable safeguards.
+
+
+### Cache hits should not affect dependency health
+
+Caching remains outside circuit breaking and retry.
+
+A cache hit performs no dependency interaction and therefore should not consume
+retry capacity or influence circuit state.
+
+Review lesson:
+
+Decorator ordering changes semantics, not merely code organisation.
+
+
+### Backpressure belongs at the ownership boundary
+
+An application semaphore was considered and rejected as the generic production
+backpressure mechanism.
+
+For a pull-based durable queue, consumer concurrency, prefetch / outstanding
+delivery limits and acknowledgement behaviour should normally keep excess work
+in the upstream queue.
+
+Review lesson:
+
+Do not duplicate infrastructure responsibility inside the application without
+first identifying where work ownership actually transfers.
+
+
+### Rate limiting and backpressure are different
+
+A configured rate controls how quickly work may be offered or consumed.
+
+Backpressure is the dynamic propagation of reduced downstream capacity toward
+upstream work acquisition.
+
+Review lesson:
+
+A fixed rate may participate in a backpressure design but does not by itself
+define one.
+
+
+### Observability does not require building an observability framework
+
+The production system should expose signals for:
+
+- terminal success
+- business failure by stage
+- unresolved orders
+- retry exhaustion
+- circuit behaviour
+- dependency latency
+- end-to-end latency
+- queue backlog / lag
+
+Orderforge does not need custom metrics infrastructure to demonstrate that
+design.
+
+Review lesson:
+
+Identify what must be observable separately from deciding which production
+platform records it.
+
+
+### Persistence must follow ownership
+
+Local persistence cannot make an ambiguous remote mutation idempotent if the
+actual side-effect owner does not participate in the idempotency protocol.
+
+Likewise, locally simulating queue lease / acknowledgement behaviour does not
+prove correctness against a real queue.
+
+Review lesson:
+
+Durability is useful only when it is placed at the boundary that owns the
+state or side effect being recovered.
+
+
+### Do not invent external contracts
+
+The exercise establishes JSON API interactions but the repository does not
+contain the concrete testserver endpoint and payload contract.
+
+HTTP adapters were therefore not fabricated.
+
+Review lesson:
+
+An abstraction can be ready for integration without guessing the contract of
+the external system.
+
+The correct implementation point is when that contract becomes known.
+
+
+### Final review progression
+
+The review drill evolved through:
+
+code shape
+    ->
+local correctness
+    ->
+state-machine correctness
+    ->
+failure semantics
+    ->
+ownership
+    ->
+ambiguous outcomes
+    ->
+concurrency / atomicity
+    ->
+resilience composition
+    ->
+build vs reuse
+    ->
+system boundaries
+
+The final question is no longer only:
+
+"Is this implementation correct?"
+
+It also includes:
+
+"Should this responsibility be implemented here at all?"

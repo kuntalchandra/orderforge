@@ -671,17 +671,46 @@ PyBreaker.
 
 DONE — implemented using PyBreaker.
 
-7. External JSON API integration + project closure
+7. Production boundary review + project closure
 
-Replace the in-memory external boundaries with thin HTTP/JSON adapters matching
-the exercise API contract while preserving the orchestration and resilience
-layers already established in Phases 1-6.
+Review how the existing Orderforge abstractions map to the real external
+boundaries described by the exercise without inventing infrastructure or API
+contracts that were not supplied.
 
 Guarantee:
 
-Real remote API interactions can replace the in-memory adapters without
-rewriting the Order state machine or weakening the failure-handling guarantees
-established in earlier phases.
+The core Order state machine and resilience policies remain separated from
+transport and infrastructure concerns, so concrete production adapters can be
+introduced against their actual contracts without rewriting orchestration.
+
+Implementation decision:
+
+No additional production adapter code is added in this phase.
+
+The available exercise material establishes that interactions happen through
+JSON APIs and may be unreliable, but the repository does not contain the
+concrete testserver contract required to implement faithful HTTP adapters:
+
+HTTP methods
+endpoint paths
+request schemas
+response schemas
+status-code semantics
+queue claim semantics
+idempotency support
+
+Inventing those details would test a fictional integration rather than the
+provided problem.
+
+The existing interfaces remain the intended integration seams:
+
+OrderQueue
+GenerationService
+ArtifactRepository
+ResultPublisher
+
+A real adapter should implement those interfaces once the corresponding
+external contract is known.
 
 Scope
 
@@ -850,19 +879,53 @@ Cache state remains process-local and disposable.
 Unresolved-order durability would become an integration decision when the
 system is connected to real persistence or operational recovery workflows.
 
+Production integration contract
+
+When the real JSON API contract is available, thin adapters should follow these
+rules:
+
+Transport timeout / connection failure / explicitly retryable server failure
+        |
+        v
+TransientError
+        |
+        v
+existing RetryingProxy
+
+Transport code performs one logical HTTP attempt. Retry policy remains in
+Orderforge rather than being duplicated invisibly inside the HTTP client.
+
+A finite per-attempt network timeout is mandatory. Retry and circuit breaking
+cannot protect capacity effectively if an individual remote call can block
+indefinitely.
+
+Malformed responses, invalid requests and contract violations should fail
+explicitly rather than automatically being classified as transient dependency
+failures.
+
+For mutating operations, the stable idempotency keys established in Phase 3
+must cross the remote boundary only through a contract actually supported by
+the downstream API.
+
+A client-generated key alone does not provide remote idempotency.
+
 Project closure criterion
 
-Phase 7 is complete when:
+The coding exercise is complete after Phase 6.
 
-the external JSON API boundary is represented by real/thin adapters
-the existing orchestration does not need structural rewriting
-transport failures feed the existing resilience model correctly
-idempotency keys are propagated where supported
-adapter-level behavioural tests cover the important mappings
-the remaining production concerns are explicitly documented rather than
-reimplemented as exercise infrastructure
+Phase 7 closes the remaining production-boundary questions by documenting:
 
-DONE when reviewed and integrated.
+how real JSON adapters fit the existing interfaces
+where transport failures enter the resilience model
+why queue backpressure belongs primarily at the queue/consumer boundary
+which observability signals production should expose
+where durable persistence would actually be required
+which guarantees depend on external-system contracts
+
+No additional infrastructure is implemented merely to simulate production
+components whose real contracts are unavailable.
+
+DONE — reviewed as a design boundary and project closure phase.
 
 Testing strategy
 
