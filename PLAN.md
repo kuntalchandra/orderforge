@@ -1312,3 +1312,115 @@ exists.
 Custom code should concentrate on Orderforge-specific contracts, integration
 policy, failure semantics and state-machine correctness.
 
+## Next learning loop
+
+The implementation exercise is complete.
+
+Use the project from here as a compact fundamentals and design-review workbook
+rather than extending it with more infrastructure.
+
+The next learning loop should stay iterative:
+
+1. Reconstruct the core flow
+
+Start from the business state machine rather than the implementation.
+
+Be able to explain, from memory:
+
+Order
+    ->
+Asset generation
+    ->
+Asset / AssetDetail retrieval
+    ->
+Metadata generation
+    ->
+Metadata retrieval
+    ->
+FailedOrder or ShippableOrder
+
+Then identify which guarantees belong to the domain and which belong to the
+client implementation.
+
+2. Rotate one completed topic at a time
+
+Pick one topic without following phase order:
+
+retry
+idempotency
+concurrency
+caching
+circuit breaking
+queue / backpressure boundaries
+remote API failure handling
+
+For that topic, answer only:
+
+What problem does it solve?
+What failure mode triggered it?
+Where does the responsibility belong?
+What was the important design decision?
+What would make the current decision invalid?
+
+Prefer a short explanation from memory first, then use this PLAN to fill gaps.
+
+3. Apply the topic to a small changed requirement
+
+After reviewing the concept, introduce one practical variation to the exercise.
+
+Examples:
+
+generation occasionally times out
+the same Order may be delivered twice
+many Orders must run concurrently
+artifact reads become expensive
+a downstream dependency stays unavailable
+the queue starts accumulating backlog
+the in-memory dependency becomes a remote JSON API
+
+Decide which existing mechanism applies, what must change, and what should
+deliberately remain unchanged.
+
+Do not automatically apply every resilience mechanism to every variation.
+
+4. Reverse-shadow the decision
+
+After proposing the change, review it from the opposite direction:
+
+What assumption did I make?
+What happens after an ambiguous failure?
+Who owns the mutable or durable state?
+What happens under concurrency?
+Am I duplicating something the queue, database, HTTP client or library should
+already own?
+Can the design stay simpler?
+
+The goal is not to find another feature to build.
+
+The goal is to improve the speed of moving from:
+
+changed requirement
+    ->
+failure model
+    ->
+ownership boundary
+    ->
+smallest justified design change
+
+Quick restart points
+
+A future learning session can resume directly from any of these:
+
+A. State machine and failure semantics
+B. Retry and ambiguous remote outcomes
+C. Idempotency and side-effect ownership
+D. Concurrency, locking and logical ownership
+E. Cache stampede, freshness and object ownership
+F. Retry + circuit-breaker composition
+G. Queue backpressure and infrastructure boundaries
+H. Remote JSON API integration and error classification
+I. Build-vs-reuse review across the complete exercise
+
+The topics can be rotated randomly. Depth should follow the gap discovered
+during the discussion rather than a fixed sequence.
+
