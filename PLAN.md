@@ -396,25 +396,18 @@ DONE — reviewed and corrected.
 
 6. Circuit breaker
 
-Protect external-facing operations from repeated calls into dependency
-operations already known to be unhealthy.
+Protect external-facing operations from repeated calls into dependency operations already known to be unhealthy.
 
 Guarantee:
 
-A dependency operation that repeatedly exhausts its retry budget is temporarily
-removed from the request path. Subsequent workers fail fast rather than
-continuing to spend retry capacity on a predictably unhealthy integration
+A dependency operation that repeatedly exhausts its retry budget is temporarily removed from the request path. Subsequent workers fail fast rather than continuing to spend retry capacity on a predictably unhealthy integration
 point.
 
 Library decision — build vs reuse
 
-Phase 6 uses PyBreaker rather than implementing the CLOSED / OPEN / HALF_OPEN
-state machine inside Orderforge.
+Phase 6 uses PyBreaker rather than implementing the CLOSED / OPEN / HALF_OPEN state machine inside Orderforge.
 
-Circuit state transitions, failure counters, recovery timing, half-open probing
-and thread-safety are commodity resilience mechanisms. Reimplementing them would
-add concurrency and lifecycle correctness risk without adding Orderforge domain
-value.
+Circuit state transitions, failure counters, recovery timing, half-open probing and thread-safety are commodity resilience mechanisms. Reimplementing them would add concurrency and lifecycle correctness risk without adding Orderforge domain value.
 
 Orderforge still owns the decisions specific to this system:
 
@@ -425,12 +418,9 @@ what an open circuit means for an Order
 configuration
 future metrics and operational visibility
 
-The earlier custom implementation review was still useful because it exposed
-the complexity hidden behind a circuit breaker: concurrent state transitions,
-half-open probe ownership and stale in-flight completions.
+The earlier custom implementation review was still useful because it exposed the complexity hidden behind a circuit breaker: concurrent state transitions, half-open probe ownership and stale in-flight completions.
 
-Understanding those mechanisms is useful. Owning another implementation of
-them is not required.
+Understanding those mechanisms is useful. Owning another implementation of them is not required.
 
 Breaker outside retry — logical failure vs physical attempt
 
@@ -444,8 +434,7 @@ RetryingProxy
         v
 Dependency
 
-The breaker therefore observes the result of one logical dependency operation
-after RetryingProxy consumes its retry budget.
+The breaker therefore observes the result of one logical dependency operation after RetryingProxy consumes its retry budget.
 
 For example:
 
@@ -454,8 +443,7 @@ breaker failure_threshold = 5
 
 One logical call may make three physical dependency attempts.
 
-If all three attempts fail, RetryingProxy raises one RetryExhaustedError and
-PyBreaker records one circuit failure.
+If all three attempts fail, RetryingProxy raises one RetryExhaustedError and PyBreaker records one circuit failure.
 
 The opposite composition:
 
@@ -469,23 +457,19 @@ Dependency
 
 would allow individual physical retry attempts to advance circuit health state.
 
-One caller could therefore consume several breaker failures during its own retry
-sequence.
+One caller could therefore consume several breaker failures during its own retry sequence.
 
-Phase 6 intentionally measures dependency health at logical-operation
-granularity.
+Phase 6 intentionally measures dependency health at logical-operation granularity.
 
 Failure classification — not every exception means dependency failure
 
 Only RetryExhaustedError contributes to circuit health.
 
-RetryExhaustedError represents a transient dependency interaction that remained
-unavailable after consuming its retry budget.
+RetryExhaustedError represents a transient dependency interaction that remained unavailable after consuming its retry budget.
 
 That is meaningful evidence of dependency-health degradation.
 
-Validation errors, business errors, idempotency conflicts and invariant /
-programming errors propagate normally but do not advance the breaker.
+Validation errors, business errors, idempotency conflicts and invariant / programming errors propagate normally but do not advance the breaker.
 
 Conceptually:
 
@@ -499,16 +483,13 @@ propagate
     ->
 not a dependency-health signal
 
-Opening an availability circuit because of invalid application input would
-misclassify correctness failure as dependency failure.
+Opening an availability circuit because of invalid application input would misclassify correctness failure as dependency failure.
 
 CircuitOpenError — availability control signal, not business outcome
 
-PyBreaker's CircuitBreakerError is translated at the Orderforge boundary into
-CircuitOpenError.
+PyBreaker's CircuitBreakerError is translated at the Orderforge boundary into CircuitOpenError.
 
-Orderforge therefore does not leak a third-party library exception through its
-worker/orchestration contracts.
+Orderforge therefore does not leak a third-party library exception through its worker/orchestration contracts.
 
 For an Order already acquired from the queue:
 
@@ -520,18 +501,13 @@ UnresolvedOrderRegistry
 
 Neither condition creates FailedOrder.
 
-A circuit being open means the dependency operation was deliberately not
-attempted. It does not prove that Asset or Metadata generation reached its
-FAILED business state.
+A circuit being open means the dependency operation was deliberately not attempted. It does not prove that Asset or Metadata generation reached its FAILED business state.
 
-For OrderQueue.take(), no reliable Order has yet been acquired. An open queue
-circuit therefore follows the existing queue-level failure path and triggers
-coordinated worker shutdown.
+For OrderQueue.take(), no reliable Order has yet been acquired. An open queue circuit therefore follows the existing queue-level failure path and triggers coordinated worker shutdown.
 
 Breaker granularity — shared across workers, isolated by operation
 
-Breaker instances are shared by all workers but isolated by logical dependency
-operation.
+Breaker instances are shared by all workers but isolated by logical dependency operation.
 
 Current operation boundaries:
 
@@ -560,8 +536,7 @@ same dependency operation
     v
 same breaker
 
-A breaker per worker or per Order would be ineffective because each worker
-would independently rediscover the same outage.
+A breaker per worker or per Order would be ineffective because each worker would independently rediscover the same outage.
 
 A single breaker for an entire interface can create unnecessary blast radius.
 
@@ -576,8 +551,7 @@ artifact_repository.get_assets is unavailable
 
 Phase 6 therefore starts with operation-level breakers.
 
-Health boundaries can later be consolidated if production behaviour proves
-several operations always fail and recover together.
+Health boundaries can later be consolidated if production behaviour proves several operations always fail and recover together.
 
 Cache interaction
 
@@ -603,8 +577,7 @@ circuit-breaker health accounting
 
 Only a real dependency interaction participates in circuit-health decisions.
 
-This preserves the Phase 5 principle that cached reads should not consume
-resilience capacity intended for remote dependency interactions.
+This preserves the Phase 5 principle that cached reads should not consume resilience capacity intended for remote dependency interactions.
 
 Idempotency interaction
 
@@ -625,22 +598,17 @@ Dependency
 
 Retry continues to reuse the stable idempotency key established in Phase 3.
 
-Circuit breaking decides whether an interaction should currently be attempted.
-It does not solve ambiguous mutation outcomes and does not replace downstream
-authoritative idempotency.
+Circuit breaking decides whether an interaction should currently be attempted. It does not solve ambiguous mutation outcomes and does not replace downstream authoritative idempotency.
 
 Shared-state scope
 
-Circuit breaker instances are created once inside run() and shared by the
-worker pool for that run.
+Circuit breaker instances are created once inside run() and shared by the worker pool for that run.
 
 They are not created per worker or per Order.
 
 Phase 6 remains single-process. Circuit health is therefore process-local.
 
-Distributed breaker state is deliberately not introduced. Whether breaker
-health should be shared between processes is a separate operational decision
-rather than an automatic improvement.
+Distributed breaker state is deliberately not introduced. Whether breaker health should be shared between processes is a separate operational decision rather than an automatic improvement.
 
 Recovery semantics
 
@@ -648,15 +616,13 @@ CLOSED
 
 Calls flow normally.
 
-Once the configured logical failure threshold is reached, PyBreaker opens the
-circuit.
+Once the configured logical failure threshold is reached, PyBreaker opens the circuit.
 
 OPEN
 
 Calls fail fast without invoking the protected operation.
 
-After the configured recovery timeout, PyBreaker manages the HALF_OPEN recovery
-behaviour.
+After the configured recovery timeout, PyBreaker manages the HALF_OPEN recovery behaviour.
 
 HALF_OPEN
 
@@ -666,30 +632,23 @@ Successful recovery closes the circuit.
 
 Failed recovery opens it again.
 
-Orderforge delegates these concurrency-sensitive state transitions to
-PyBreaker.
+Orderforge delegates these concurrency-sensitive state transitions to PyBreaker.
 
 DONE — implemented using PyBreaker.
 
 7. Production boundary review + project closure
 
-Review how the existing Orderforge abstractions map to the real external
-boundaries described by the exercise without inventing infrastructure or API
-contracts that were not supplied.
+Review how the existing Orderforge abstractions map to the real external boundaries described by the exercise without inventing infrastructure or API contracts that were not supplied.
 
 Guarantee:
 
-The core Order state machine and resilience policies remain separated from
-transport and infrastructure concerns, so concrete production adapters can be
-introduced against their actual contracts without rewriting orchestration.
+The core Order state machine and resilience policies remain separated from transport and infrastructure concerns, so concrete production adapters can be introduced against their actual contracts without rewriting orchestration.
 
 Implementation decision:
 
 No additional production adapter code is added in this phase.
 
-The available exercise material establishes that interactions happen through
-JSON APIs and may be unreliable, but the repository does not contain the
-concrete testserver contract required to implement faithful HTTP adapters:
+The available exercise material establishes that interactions happen through JSON APIs and may be unreliable, but the repository does not contain the concrete testserver contract required to implement faithful HTTP adapters:
 
 HTTP methods
 endpoint paths
@@ -699,8 +658,7 @@ status-code semantics
 queue claim semantics
 idempotency support
 
-Inventing those details would test a fictional integration rather than the
-provided problem.
+Inventing those details would test a fictional integration rather than the provided problem.
 
 The existing interfaces remain the intended integration seams:
 
@@ -709,8 +667,7 @@ GenerationService
 ArtifactRepository
 ResultPublisher
 
-A real adapter should implement those interfaces once the corresponding
-external contract is known.
+A real adapter should implement those interfaces once the corresponding external contract is known.
 
 Scope
 
@@ -752,9 +709,7 @@ The orchestrator remains unaware of HTTP.
 
 Transport failure mapping
 
-Remote interaction failures should map into the existing Orderforge failure
-model rather than introducing transport-specific behaviour into the
-orchestrator.
+Remote interaction failures should map into the existing Orderforge failure model rather than introducing transport-specific behaviour into the orchestrator.
 
 Examples:
 
@@ -771,13 +726,11 @@ RetryingProxy
         v
 retry exhaustion if unavailable long enough
 
-Programming, malformed-response and contract violations should fail explicitly
-rather than being misclassified as temporary dependency outages.
+Programming, malformed-response and contract violations should fail explicitly rather than being misclassified as temporary dependency outages.
 
 HTTP library decision
 
-Use a mature HTTP client library rather than implementing networking,
-connection pooling or transport retry machinery from scratch.
+Use a mature HTTP client library rather than implementing networking, connection pooling or transport retry machinery from scratch.
 
 Orderforge owns:
 
@@ -793,9 +746,7 @@ Backpressure — design decision only
 
 No application-level backpressure subsystem is added.
 
-In a production queue-backed system, excess work should normally remain in the
-durable upstream queue rather than being eagerly consumed into an internal
-application backlog.
+In a production queue-backed system, excess work should normally remain in the durable upstream queue rather than being eagerly consumed into an internal application backlog.
 
 The primary controls would normally include queue or consumer configuration
 such as:
@@ -818,18 +769,15 @@ queue delivery slows
         v
 backlog remains upstream
 
-Worker-pool capacity, downstream connection-pool capacity and queue delivery
-configuration should be tuned together.
+Worker-pool capacity, downstream connection-pool capacity and queue delivery configuration should be tuned together.
 
-A separate Orderforge semaphore would duplicate part of that responsibility
-without representing the real production ownership boundary.
+A separate Orderforge semaphore would duplicate part of that responsibility without representing the real production ownership boundary.
 
 Observability — design decision only
 
 No custom metrics framework is implemented.
 
-A production implementation should expose the existing guarantees through the
-organisation's standard logging, metrics and tracing stack.
+A production implementation should expose the existing guarantees through the organisation's standard logging, metrics and tracing stack.
 
 Relevant signals include:
 
@@ -844,8 +792,7 @@ end-to-end order latency
 queue backlog / lag
 cache behaviour where operationally useful
 
-Observability is treated as instrumentation of the system rather than another
-domain subsystem.
+Observability is treated as instrumentation of the system rather than another domain subsystem.
 
 Queue ownership semantics
 
@@ -859,30 +806,25 @@ acknowledgement
 redelivery
 dead-letter handling
 
-Those semantics are not simulated inside Orderforge merely to make the
-in-memory implementation appear production-grade.
+Those semantics are not simulated inside Orderforge merely to make the in-memory implementation appear production-grade.
 
-When a real queue adapter is introduced, the adapter must honour the semantics
-of that queue technology.
+When a real queue adapter is introduced, the adapter must honour the semantics of that queue technology.
 
 Persistence boundary
 
 Orderforge does not add a database merely to persist infrastructure state.
 
-Authoritative mutation idempotency remains owned by the downstream mutation
-owner, as established in Phase 3.
+Authoritative mutation idempotency remains owned by the downstream mutation owner, as established in Phase 3.
 
 Circuit-breaker state remains process-local in the current design.
 
 Cache state remains process-local and disposable.
 
-Unresolved-order durability would become an integration decision when the
-system is connected to real persistence or operational recovery workflows.
+Unresolved-order durability would become an integration decision when the system is connected to real persistence or operational recovery workflows.
 
 Production integration contract
 
-When the real JSON API contract is available, thin adapters should follow these
-rules:
+When the real JSON API contract is available, thin adapters should follow these rules:
 
 Transport timeout / connection failure / explicitly retryable server failure
         |
@@ -892,20 +834,13 @@ TransientError
         v
 existing RetryingProxy
 
-Transport code performs one logical HTTP attempt. Retry policy remains in
-Orderforge rather than being duplicated invisibly inside the HTTP client.
+Transport code performs one logical HTTP attempt. Retry policy remains in Orderforge rather than being duplicated invisibly inside the HTTP client.
 
-A finite per-attempt network timeout is mandatory. Retry and circuit breaking
-cannot protect capacity effectively if an individual remote call can block
-indefinitely.
+A finite per-attempt network timeout is mandatory. Retry and circuit breaking cannot protect capacity effectively if an individual remote call can block indefinitely.
 
-Malformed responses, invalid requests and contract violations should fail
-explicitly rather than automatically being classified as transient dependency
-failures.
+Malformed responses, invalid requests and contract violations should fail explicitly rather than automatically being classified as transient dependency failures.
 
-For mutating operations, the stable idempotency keys established in Phase 3
-must cross the remote boundary only through a contract actually supported by
-the downstream API.
+For mutating operations, the stable idempotency keys established in Phase 3 must cross the remote boundary only through a contract actually supported by the downstream API.
 
 A client-generated key alone does not provide remote idempotency.
 
@@ -915,15 +850,10 @@ The coding exercise is complete after Phase 6.
 
 Phase 7 closes the remaining production-boundary questions by documenting:
 
-how real JSON adapters fit the existing interfaces
-where transport failures enter the resilience model
-why queue backpressure belongs primarily at the queue/consumer boundary
-which observability signals production should expose
-where durable persistence would actually be required
-which guarantees depend on external-system contracts
+how real JSON adapters fit the existing interfaces where transport failures enter the resilience model
+why queue backpressure belongs primarily at the queue/consumer boundary which observability signals production should expose where durable persistence would actually be required which guarantees depend on external-system contracts
 
-No additional infrastructure is implemented merely to simulate production
-components whose real contracts are unavailable.
+No additional infrastructure is implemented merely to simulate production components whose real contracts are unavailable.
 
 DONE — reviewed as a design boundary and project closure phase.
 
@@ -937,11 +867,9 @@ Tests should prove semantics rather than merely execute lines of code.
 
 Failure-path tests must model ambiguous outcomes explicitly, including cases where the downstream side effect succeeds but the response is lost.
 
-Concurrency tests should force the relevant internal race window rather than assuming that starting threads at approximately the same time proves
-atomicity.
+Concurrency tests should force the relevant internal race window rather than assuming that starting threads at approximately the same time proves atomicity.
 
-A green suite does not by itself prove interface conformance if the relevant path or contract is insufficiently exercised. Interface definitions remain an
-independent source of truth during decorator/adapter review.
+A green suite does not by itself prove interface conformance if the relevant path or contract is insufficiently exercised. Interface definitions remain an independent source of truth during decorator/adapter review.
 
 Deviation/decision log
 Phase 2 — unresolved registry lifecycle
@@ -1032,15 +960,13 @@ Jitter initially defaulted to zero, which defeated its purpose under concurrent 
 
 Jitter is now enabled by default.
 
-The final jittered delay is also capped by max_delay_seconds; the configured maximum represents the actual maximum sleep rather than only the pre-jitter
-base delay.
+The final jittered delay is also capped by max_delay_seconds; the configured maximum represents the actual maximum sleep rather than only the pre-jitter base delay.
 
 Phase 4 — deterministic concurrency testing
 
 Placing a barrier immediately before a production method call does not prove that threads collide inside the actual check/mutate race window.
 
-Concurrency tests therefore coordinate the observed internal state transition where necessary so an unlocked implementation would deterministically expose
-the race.
+Concurrency tests therefore coordinate the observed internal state transition where necessary so an unlocked implementation would deterministically expose the race.
 
 Phase 4 — publisher snapshots
 
@@ -1117,24 +1043,19 @@ get_asset_detail(asset_id, order_id)
 get_metadata(order_id)
 
 The decorator was corrected to preserve that interface exactly rather than forcing caching-specific assumptions onto existing callers.
-reinforced that passing tests do not independently prove interface conformance
-when a relevant path is insufficiently exercised.
+reinforced that passing tests do not independently prove interface conformance when a relevant path is insufficiently exercised.
 
 Phase 6 — build vs reuse
 
-The first Phase 6 design explored implementing the circuit-breaker state machine
-inside Orderforge.
+The first Phase 6 design explored implementing the circuit-breaker state machine inside Orderforge.
 
-Reviewing that approach exposed significant concurrency and lifecycle
-complexity, including CLOSED / OPEN / HALF_OPEN transitions, recovery-probe
-ownership and stale in-flight completions.
+Reviewing that approach exposed significant concurrency and lifecycle complexity, including CLOSED / OPEN / HALF_OPEN transitions, recovery-probe ownership and stale in-flight completions.
 
 That implementation direction was deliberately discarded before commit.
 
 Phase 6 instead uses PyBreaker and limits Orderforge code to integration policy.
 
-The design lesson is to distinguish understanding an infrastructure mechanism
-from needing to own its implementation.
+The design lesson is to distinguish understanding an infrastructure mechanism from needing to own its implementation.
 
 Build vs reuse should be an explicit engineering decision.
 
@@ -1143,11 +1064,9 @@ Phase 6 — retry vs circuit-breaker ordering
 
 CircuitBreakingProxy wraps RetryingProxy.
 
-The breaker therefore sees one RetryExhaustedError after a complete retry
-sequence as one failed logical operation.
+The breaker therefore sees one RetryExhaustedError after a complete retry sequence as one failed logical operation.
 
-It does not count every physical retry attempt as an independent breaker
-failure.
+It does not count every physical retry attempt as an independent breaker failure.
 
 This prevents one caller's retry loop from consuming several breaker failures.
 
@@ -1158,56 +1077,44 @@ Not every exception means that a dependency is unhealthy.
 
 Only RetryExhaustedError contributes to circuit health.
 
-Validation, business, idempotency and invariant errors propagate without
-advancing the circuit.
+Validation, business, idempotency and invariant errors propagate without advancing the circuit.
 
-This avoids opening an availability circuit because of application-level
-correctness failures.
+This avoids opening an availability circuit because of application-level correctness failures.
 
 
 Phase 6 — breaker granularity
 
-Breaker state is shared across workers but isolated by logical dependency
-operation.
+Breaker state is shared across workers but isolated by logical dependency operation.
 
-A per-worker breaker would allow every worker to independently rediscover the
-same outage.
+A per-worker breaker would allow every worker to independently rediscover the same outage.
 
-A single breaker across unrelated operations can create unnecessary blast
-radius by allowing one failing endpoint to block another healthy endpoint.
+A single breaker across unrelated operations can create unnecessary blast radius by allowing one failing endpoint to block another healthy endpoint.
 
 Phase 6 therefore starts with operation-level breakers.
 
-Those health boundaries can be consolidated later if production evidence shows
-that several operations always fail and recover together.
+Those health boundaries can be consolidated later if production evidence shows that several operations always fail and recover together.
 
 
 Phase 6 — open circuit is unresolved, not FAILED
 
-CircuitOpenError means Orderforge deliberately did not invoke a dependency
-because recent interaction history indicates that operation is unhealthy.
+CircuitOpenError means Orderforge deliberately did not invoke a dependency because recent interaction history indicates that operation is unhealthy.
 
 It does not prove Asset or Metadata generation reached its FAILED domain state.
 
-For an already-known Order, the condition is recorded in
-UnresolvedOrderRegistry.
+For an already-known Order, the condition is recorded in UnresolvedOrderRegistry.
 
-For OrderQueue.take(), where no Order has safely been acquired, the condition
-is treated as an intake-level worker failure.
+For OrderQueue.take(), where no Order has safely been acquired, the condition is treated as an intake-level worker failure.
 
 
 Phase 6 — circuit breaker does not provide backpressure
 
-Fail-fast protection prevents workers from repeatedly spending retry capacity
-on a known-unhealthy operation.
+Fail-fast protection prevents workers from repeatedly spending retry capacity on a known-unhealthy operation.
 
 It does not control how quickly new work is acquired.
 
-If workers continue taking Orders while a downstream circuit is open, many
-Orders may rapidly become unresolved.
+If workers continue taking Orders while a downstream circuit is open, many Orders may rapidly become unresolved.
 
-Controlling intake when offered load or downstream capacity is insufficient is
-a separate concern and remains Phase 7 backpressure.
+Controlling intake when offered load or downstream capacity is insufficient is a separate concern and remains Phase 7 backpressure.
 
 Roadmap scope cut after Phase 6
 
@@ -1219,8 +1126,7 @@ persistence + real API/queue
 
 After completing Phases 1-6, that scope was deliberately reduced.
 
-The project already covers the core correctness and application-resilience
-concepts:
+The project already covers the core correctness and application-resilience concepts:
 
 state-machine correctness
 retry
@@ -1231,93 +1137,70 @@ cache stampede / freshness
 circuit breaking
 build-vs-reuse judgement
 
-Continuing to implement queue infrastructure, a metrics subsystem and durable
-coordination would expand the exercise beyond its primary learning and problem
-requirements.
+Continuing to implement queue infrastructure, a metrics subsystem and durable coordination would expand the exercise beyond its primary learning and problem requirements.
 
-Those topics remain important production concerns, but implementation is not
-automatically the right way to learn or demonstrate them.
+Those topics remain important production concerns, but implementation is not automatically the right way to learn or demonstrate them.
 
 
 Phase 7 — queue backpressure responsibility
 
 An application-level admission semaphore was considered and rejected.
 
-For a production pull-based queue, the durable queue should normally remain the
-backlog.
+For a production pull-based queue, the durable queue should normally remain the backlog.
 
-Consumer concurrency, prefetch / outstanding-delivery limits and acknowledgement
-behaviour should prevent the application from claiming substantially more work
-than it can process.
+Consumer concurrency, prefetch / outstanding-delivery limits and acknowledgement behaviour should prevent the application from claiming substantially more work than it can process.
 
-This keeps excess work in infrastructure designed to retain and recover it
-rather than creating another application-side backlog.
+This keeps excess work in infrastructure designed to retain and recover it rather than creating another application-side backlog.
 
-Application-specific bulkheads may still be useful when individual downstream
-dependencies have much smaller concurrency limits, but that is distinct from
-generic queue backpressure.
+Application-specific bulkheads may still be useful when individual downstream dependencies have much smaller concurrency limits, but that is distinct from generic queue backpressure.
 
 
 Phase 7 — rate limiting vs backpressure
 
 A fixed publish or consume rate is a rate-control policy.
 
-Backpressure is the dynamic effect where slower downstream processing reduces
-the rate at which upstream work can safely progress.
+Backpressure is the dynamic effect where slower downstream processing reduces the rate at which upstream work can safely progress.
 
 The concepts interact but are not equivalent.
 
-Queue configuration should be chosen so that downstream slowdown naturally
-reduces work acquisition rather than merely buffering more work inside the
-process.
+Queue configuration should be chosen so that downstream slowdown naturally reduces work acquisition rather than merely buffering more work inside the process.
 
 
 Phase 7 — observability scope
 
-Metrics, logs and traces are required in a real production system, but
-Orderforge does not need to implement its own observability framework.
+Metrics, logs and traces are required in a real production system, but Orderforge does not need to implement its own observability framework.
 
-The valuable design task is identifying which guarantees must be measurable and
-where instrumentation belongs.
+The valuable design task is identifying which guarantees must be measurable and where instrumentation belongs.
 
-Production code should integrate those signals with the organisation's existing
-observability stack.
+Production code should integrate those signals with the organisation's existing observability stack.
 
 
 Phase 7 — persistence scope
 
-Persistence is introduced only where a real ownership or recovery requirement
-demands it.
+Persistence is introduced only where a real ownership or recovery requirement demands it.
 
-A local persistence layer cannot repair an ambiguous remote mutation unless the
-actual side-effect owner participates in the idempotency protocol.
+A local persistence layer cannot repair an ambiguous remote mutation unless the actual side-effect owner participates in the idempotency protocol.
 
-Likewise, simulating durable queue reserve / ack semantics locally would not
-prove correctness against a real queue.
+Likewise, simulating durable queue reserve / ack semantics locally would not prove correctness against a real queue.
 
-The final phase therefore focuses on real integration boundaries rather than
-inventing substitutes for external infrastructure.
+The final phase therefore focuses on real integration boundaries rather than inventing substitutes for external infrastructure.
 
 
 Phase 7 — final build-vs-reuse principle
 
 The Phase 6 circuit-breaker review reinforced a broader project rule:
 
-understanding a mechanism does not imply Orderforge should implement that
-mechanism.
+understanding a mechanism does not imply Orderforge should implement that mechanism.
 
-Commodity infrastructure should normally be reused when a mature implementation
-exists.
+Commodity infrastructure should normally be reused when a mature implementation exists.
 
-Custom code should concentrate on Orderforge-specific contracts, integration
-policy, failure semantics and state-machine correctness.
+Custom code should concentrate on Orderforge-specific contracts, integration policy, failure semantics and state-machine correctness.
 
 ## Next learning loop
 
 The implementation exercise is complete.
 
-Use the project from here as a compact fundamentals and design-review workbook
-rather than extending it with more infrastructure.
+Use the project from here as a compact fundamentals and design-review workbook rather than extending it with more infrastructure.
 
 The next learning loop should stay iterative:
 
@@ -1339,8 +1222,7 @@ Metadata retrieval
     ->
 FailedOrder or ShippableOrder
 
-Then identify which guarantees belong to the domain and which belong to the
-client implementation.
+Then identify which guarantees belong to the domain and which belong to the client implementation.
 
 2. Rotate one completed topic at a time
 
@@ -1370,16 +1252,9 @@ After reviewing the concept, introduce one practical variation to the exercise.
 
 Examples:
 
-generation occasionally times out
-the same Order may be delivered twice
-many Orders must run concurrently
-artifact reads become expensive
-a downstream dependency stays unavailable
-the queue starts accumulating backlog
-the in-memory dependency becomes a remote JSON API
+generation occasionally times out the same Order may be delivered twice many Orders must run concurrently artifact reads become expensive a downstream dependency stays unavailable the queue starts accumulating backlog the in-memory dependency becomes a remote JSON API
 
-Decide which existing mechanism applies, what must change, and what should
-deliberately remain unchanged.
+Decide which existing mechanism applies, what must change, and what should deliberately remain unchanged.
 
 Do not automatically apply every resilience mechanism to every variation.
 
@@ -1421,6 +1296,4 @@ G. Queue backpressure and infrastructure boundaries
 H. Remote JSON API integration and error classification
 I. Build-vs-reuse review across the complete exercise
 
-The topics can be rotated randomly. Depth should follow the gap discovered
-during the discussion rather than a fixed sequence.
-
+The topics can be rotated randomly. Depth should follow the gap discovered during the discussion rather than a fixed sequence.
